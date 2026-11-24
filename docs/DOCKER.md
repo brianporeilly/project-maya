@@ -61,8 +61,10 @@ The image is a fat binary: each engine carries compiled code for each architectu
 - **`--cuda 12` is the toolkit `maya.py` itself picks** for a PC with a V100 and a Blackwell card: 12.8 or newer for
   Blackwell, older than 13 for Volta.
 - **Not covered:**
-  - Pascal (`60`, `61`), experimental in Maya. CUDA 12 can compile for it (`--cuda 12 --archs "61;70;…"`), but no
-    such image was built here.
+  - Pascal (`60` for the P100, `61` for the P40 and GTX 10), experimental in Maya. CUDA 12 compiles for it:
+    `--cuda 12 --archs "60"`. `maya-mm3` (MiniMax) needs sm_70 or newer, so an image for Pascal alone has `maya` and
+    `maya-ds4` only, and the checks expect just those two (`/opt/maya/image/engines.txt` lists the engines built). No
+    such image has been run on a Pascal card here yet.
   - AMD and Apple: the HIP and Metal builds aren't part of this recipe.
   - ARM64, such as a DGX Spark or Grace: the image is x86-64.
 
@@ -85,6 +87,23 @@ at the first failed check, before anything is pushed. None of the checks needs a
 
 `docker/build.sh --check-only <image>` runs the same checks on an image built before. Give it the same `--cuda` and
 `--archs`.
+
+### Podman
+
+`docker/build.sh` uses `docker` when it is installed and `podman` otherwise; `--engine podman` picks podman. The
+Dockerfile builds unchanged under podman (buildah): its ccache mount, `RUN --mount=type=cache`, works there too
+(`podman system prune --build` clears it). To run the image, the GPUs go in through CDI instead of `--gpus all`:
+install the NVIDIA Container Toolkit, run `sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml` once, and pass
+`--device nvidia.com/gpu=all`. Rootless podman can't raise `memlock` past your user's hard limit, so raise that
+(`memlock` in `/etc/security/limits.conf`) or run the container as root:
+
+```bash
+podman run --rm --device nvidia.com/gpu=all --ulimit memlock=-1 -p 8080:8080 \
+  -v /path/to/models:/models:ro -v maya-data:/data \
+  localhost/project-maya:1.1.78-cuda12 \
+  /opt/maya/.venv/bin/python /opt/maya/serve/server.py --engine maya --config /data/<model>/<config>.json \
+    --host 0.0.0.0 --port 8080
+```
 
 ## Running it
 

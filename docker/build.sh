@@ -5,6 +5,8 @@
 #   docker/build.sh                          # the release VERSION names (tag vX.Y.Z), CUDA 13
 #   docker/build.sh --ref v1.1.51            # another release (any tag or commit of this repository)
 #   docker/build.sh --cuda 12                # CUDA 12: adds Volta (sm_70)
+#   docker/build.sh --cuda 12 --archs "60"   # Pascal (P100; "61" for P40 / GTX 10), experimental: no maya-mm3
+#   docker/build.sh --engine podman          # build and check with podman instead of docker
 #   docker/build.sh --archs "86;89"          # only these CUDA architectures (a smaller, faster build)
 #   docker/build.sh --image ghcr.io/<you>/maya --push
 #   docker/build.sh --check-only <image>     # run the checks on an image built before
@@ -14,7 +16,9 @@
 #                      changes and untracked files never reach the image
 #   --cuda 13|12       the CUDA base (default 13). 13: CUDA 13.0, archs 75;80;86;89;120, driver 580 or newer.
 #                      12: CUDA 12.9, archs 70;75;80;86;89;120, driver 575 or newer
-#   --archs LIST       CMAKE_CUDA_ARCHITECTURES instead of the --cuda default
+#   --archs LIST       CMAKE_CUDA_ARCHITECTURES instead of the --cuda default. Pascal (60, 61) needs --cuda 12;
+#                      maya-mm3 is built (and checked) only when the list has 70 or newer
+#   --engine NAME      docker or podman (default: docker if it is installed, else podman)
 #   --image NAME       the image name (default project-maya); tagged NAME:<version>-cuda<13|12>
 #   --push             push the tag (NAME must include a registry you can push to)
 #   --jobs N           compile jobs (default: half the CPU threads, as maya.py does; nvcc takes 2-4 GB a job)
@@ -25,7 +29,8 @@
 #   - VERSION is the release (when REF is a vX.Y.Z tag);
 #   - the engines were configured portable: MAYA_PORTABLE on, GGML_NATIVE off, GGML_AVX2 on, nothing above AVX2;
 #   - they were configured for the CUDA architectures asked for;
-#   - every library of maya, maya-ds4 and maya-mm3 resolves, except the host driver's (libcuda, libnvidia-*);
+#   - every library of maya, maya-ds4 and maya-mm3 (when the archs have sm_70+) resolves, except the host driver's
+#     (libcuda, libnvidia-*);
 #   - serve/server.py and the three pack builders start (--help);
 #   - the expert profiles and MiniMax's chat template are there;
 #   - gguf-py imports the way the tools find it, and tools/iq_pack.py indexes data/glm5-synth.gguf;
@@ -33,7 +38,7 @@
 set -euo pipefail
 export PYTHONUTF8="${PYTHONUTF8:-1}"
 
-REF="" CUDA=13 ARCHS="" IMAGE="project-maya" PUSH=0 JOBS="" CHECK_ONLY=""
+REF="" CUDA=13 ARCHS="" IMAGE="project-maya" PUSH=0 JOBS="" CHECK_ONLY="" ENGINE=""
 usage() { awk 'NR > 1 && !/^#/ {exit} NR > 1 {sub(/^# ?/, ""); print}' "$0"; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -43,6 +48,7 @@ while [[ $# -gt 0 ]]; do
     --image) IMAGE="${2:?--image needs a name}"; shift 2 ;;
     --push) PUSH=1; shift ;;
     --jobs) JOBS="${2:?--jobs needs a number}"; shift 2 ;;
+    --engine) ENGINE="${2:?--engine needs docker or podman}"; shift 2 ;;
     --check-only) CHECK_ONLY="${2:?--check-only needs an image}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "[maya-docker] unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -60,7 +66,19 @@ esac
 ARCHS="${ARCHS:-$default_archs}"
 [[ "$ARCHS" =~ ^[0-9]+(;[0-9]+)*$ ]] || die "--archs takes numbers separated by ';', e.g. \"86;89\", not '$ARCHS'"
 [[ -z "$JOBS" || "$JOBS" =~ ^[1-9][0-9]*$ ]] || die "--jobs takes a positive number, not '$JOBS'"
-command -v docker >/dev/null || die "docker is not installed"
+if [[ -z "$ENGINE" ]]; then
+  if command -v docker >/dev/null; then ENGINE=docker; elif command -v podman >/dev/null; then ENGINE=podman
+  else die "neither docker nor podman is installed"; fi
+fi
+case "$ENGINE" in
+  docker|podman) command -v "$ENGINE" >/dev/null || die "$ENGINE is not installed" ;;
+  *) die "--engine takes docker or podman, not '$ENGINE'" ;;
+esac
+# maya-mm3 needs sm_70 or newer (CMakeLists.txt's _mm3_archs): with only Pascal in the list it isn't built
+engines=(maya maya-ds4)
+for a in ${ARCHS//;/ }; do
+  if (( a >= 70 )); then engines+=(maya-mm3); break; fi
+done
 
 root="$(git -C "$(dirname -- "${BASH_SOURCE[0]}")" rev-parse --show-toplevel 2>/dev/null)" \
   || die "run this from a git checkout of Project Maya"
@@ -79,7 +97,7 @@ tag="$IMAGE:$version-cuda$CUDA"
 # ── checks on a built image ─────────────────────────────────────────────────────────────────────────
 check_image() {
   local ref="$1" flags archs got missing out e
-  local run=(docker run --rm --entrypoint)
+  local run=("$ENGINE" run --rm --entrypoint)
 
   flags="$("${run[@]}" cat "$ref" /opt/maya/image/cpu-flags.txt 2>/dev/null)" \
     || die "$ref has no /opt/maya/image/cpu-flags.txt: not built by this recipe"
@@ -109,14 +127,17 @@ PY
   [[ "$got" == "$version" ]] || die "/opt/maya/VERSION says '$got', not $version"
   say "check: CUDA architectures $ARCHS, VERSION $version"
 
+  # (an image built before engines.txt existed has none: the per-engine checks below still run)
+  got="$("${run[@]}" cat "$ref" /opt/maya/image/engines.txt 2>/dev/null | xargs || true)"
+  [[ -z "$got" || "$got" == "${engines[*]}" ]] || die "the image has the engines '$got', not '${engines[*]}'"
   # libcuda and libnvidia-* come from the host driver at run time, so only those may be missing here
-  for e in maya maya-ds4 maya-mm3; do
+  for e in "${engines[@]}"; do
     "${run[@]}" test "$ref" -x "/opt/maya/build/$e" || die "$ref has no /opt/maya/build/$e"
     missing="$("${run[@]}" ldd "$ref" "/opt/maya/build/$e" | grep 'not found' | grep -v -E 'libcuda\.so|libnvidia' || true)"
     [[ -z "$missing" ]] || die "libraries of build/$e missing from the image:
 $missing"
   done
-  say "check: every library of maya, maya-ds4 and maya-mm3 resolves except the host driver's"
+  say "check: every library of ${engines[*]} resolves except the host driver's"
 
   for e in serve/server.py tools/iq_pack.py tools/ds4/pack_gguf.py tools/mm3/pack_gguf.py; do
     out="$("${run[@]}" /opt/maya/.venv/bin/python "$ref" "/opt/maya/$e" --help 2>&1)" || die "$e --help failed:
@@ -139,7 +160,7 @@ $out"
   say "check: gguf-py imports and tools/iq_pack.py indexes data/glm5-synth.gguf"
 
   # read from the image's own setup.py, so a package the release adds and the image lacks fails here
-  out="$(docker run --rm -i --entrypoint /opt/maya/.venv/bin/python "$ref" - 2>&1 <<'PY'
+  out="$("$ENGINE" run --rm -i --entrypoint /opt/maya/.venv/bin/python "$ref" - 2>&1 <<'PY'
 import ast, sys
 from importlib import metadata
 from pip._vendor.packaging.requirements import Requirement
@@ -186,8 +207,8 @@ cmake_pin="$(git -C "$root" show "$commit:CMakeLists.txt" | grep -m1 -E 'GIT_TAG
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 git -C "$root" archive "$commit" | tar -x -C "$work"
-say "building $tag from $REF (${commit:0:8}): CUDA $CUDA_VERSION, archs $ARCHS, AVX2 baseline, llama.cpp ${llama:0:7}${JOBS:+, $JOBS jobs}"
-docker build --pull -f "$root/docker/Dockerfile" \
+say "building $tag with $ENGINE from $REF (${commit:0:8}): CUDA $CUDA_VERSION, archs $ARCHS (${engines[*]}), AVX2 baseline, llama.cpp ${llama:0:7}${JOBS:+, $JOBS jobs}"
+"$ENGINE" build --pull -f "$root/docker/Dockerfile" \
   --build-arg "CUDA_VERSION=$CUDA_VERSION" \
   --build-arg "CUDA_ARCHITECTURES=$ARCHS" \
   --build-arg "LLAMA_CPP_COMMIT=$llama" \
@@ -206,6 +227,6 @@ if [[ "$PUSH" != 1 ]]; then
   say "built and checked $tag (not pushed; --push publishes)"
   exit 0
 fi
-docker push -q "$tag" >/dev/null
-digest="$(docker image inspect "$tag" --format '{{join .RepoDigests "\n"}}' | grep -m1 "^${IMAGE}@" || true)"
+"$ENGINE" push -q "$tag" >/dev/null
+digest="$("$ENGINE" image inspect "$tag" --format '{{join .RepoDigests "\n"}}' | grep -m1 "^${IMAGE}@" || true)"
 say "pushed $tag${digest:+ = $digest}"

@@ -11,7 +11,8 @@
 #     PC's own cards.
 # Text only: the vision encoder and the DFlash2 drafter are not built or fetched.
 
-# CUDA 13 builds sm_75 and newer; Volta (sm_70) needs CUDA 12 (docker/build.sh --cuda 12)
+# CUDA 13 builds sm_75 and newer; Volta (sm_70) and Pascal (sm_60 / sm_61, experimental) need CUDA 12
+# (docker/build.sh --cuda 12, with --archs "60" or "61" for Pascal)
 ARG CUDA_VERSION=13.0.0
 
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04 AS build
@@ -43,15 +44,23 @@ RUN cmake -S /src -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release \
         -DMAYA_GGML_DIR=/llama.cpp \
         -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache
 # The three engines: maya (GLM-5.3-Flash), maya-ds4 (DeepSeek-V4.1-Flash-1017) and maya-mm3 (MiniMax-M3.1-Flash).
+# maya-mm3 exists only when the list has sm_70 or newer (CMakeLists.txt's _mm3_archs: its kernels take more than
+# Pascal's 4 KB of parameters), so a Pascal-only image has the first two. The engines built go to /out/engines.txt.
 # The ccache statistics go to the build log.
 RUN --mount=type=cache,id=project-maya-ccache,target=/root/.cache/ccache \
     ccache --zero-stats >/dev/null; \
     jobs="${JOBS:-$(( $(nproc) / 2 ))}"; [ "$jobs" -ge 1 ] || jobs=1; \
-    for t in maya maya-ds4 maya-mm3; do cmake --build /build --target "$t" -j "$jobs" || exit 1; done; \
+    mkdir -p /out; : > /out/engines.txt; \
+    for t in maya maya-ds4 maya-mm3; do \
+      if [ "$t" = maya-mm3 ] && ! ninja -C /build -t targets all | grep -q '^maya-mm3:'; then \
+        echo "maya-mm3 not built: CUDA_ARCHITECTURES=${CUDA_ARCHITECTURES} has nothing at sm_70 or newer"; continue; \
+      fi; \
+      cmake --build /build --target "$t" -j "$jobs" || exit 1; echo "$t" >> /out/engines.txt; \
+    done; \
     ccache --show-stats
 # The CPU settings and the CUDA architectures the tree was configured with, read from CMakeCache.txt for
 # docker/build.sh's checks
-RUN mkdir -p /out/bin && for t in maya maya-ds4 maya-mm3; do cp "/build/$t" "/out/bin/$t" || exit 1; done \
+RUN mkdir -p /out/bin && for t in $(cat /out/engines.txt); do cp "/build/$t" "/out/bin/$t" || exit 1; done \
     && grep -E '^(MAYA_PORTABLE|GGML_NATIVE|GGML_AVX[A-Z0-9_]*|GGML_FMA|GGML_F16C|GGML_BMI2|GGML_AMX_[A-Z0-9_]*):' \
          /build/CMakeCache.txt > /out/cpu-flags.txt \
     && sed -n 's/^CMAKE_CUDA_ARCHITECTURES:[A-Z]*=//p' /build/CMakeCache.txt > /out/cuda-architectures.txt
@@ -91,7 +100,7 @@ RUN python3 -m venv /opt/maya/.venv \
     && /opt/maya/.venv/bin/pip freeze > /opt/maya/image/pip-freeze.txt
 # the engines where maya.py's setup puts them: build/maya, build/maya-ds4, build/maya-mm3
 COPY --from=build /out/bin/ /opt/maya/build/
-COPY --from=build /out/cpu-flags.txt /out/cuda-architectures.txt /opt/maya/image/
+COPY --from=build /out/cpu-flags.txt /out/cuda-architectures.txt /out/engines.txt /opt/maya/image/
 
 WORKDIR /opt/maya
 # No entrypoint: the image serves a pack and a config made for it (docs/DOCKER.md, "Running it")
