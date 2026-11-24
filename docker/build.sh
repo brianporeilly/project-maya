@@ -5,7 +5,7 @@
 #   docker/build.sh                          # the release VERSION names (tag vX.Y.Z), CUDA 13
 #   docker/build.sh --ref v1.1.51            # another release (any tag or commit of this repository)
 #   docker/build.sh --cuda 12                # CUDA 12: adds Volta (sm_70)
-#   docker/build.sh --cuda 12 --archs "60"   # Pascal (P100; "61" for P40 / GTX 10), experimental: no maya-mm3
+#   docker/build.sh --cuda 12 --archs "60"   # Pascal (P100; "61" for P40 / GTX 10), experimental: maya alone
 #   docker/build.sh --engine podman          # build and check with podman instead of docker
 #   docker/build.sh --archs "86;89"          # only these CUDA architectures (a smaller, faster build)
 #   docker/build.sh --image ghcr.io/<you>/maya --push
@@ -17,7 +17,7 @@
 #   --cuda 13|12       the CUDA base (default 13). 13: CUDA 13.0, archs 75;80;86;89;120, driver 580 or newer.
 #                      12: CUDA 12.9, archs 70;75;80;86;89;120, driver 575 or newer
 #   --archs LIST       CMAKE_CUDA_ARCHITECTURES instead of the --cuda default. Pascal (60, 61) needs --cuda 12;
-#                      maya-mm3 is built (and checked) only when the list has 70 or newer
+#                      maya-ds4 and maya-mm3 are built (and checked) only when the list has 70 or newer
 #   --engine NAME      docker or podman (default: docker if it is installed, else podman)
 #   --image NAME       the image name (default project-maya); tagged NAME:<version>-cuda<13|12>
 #   --push             push the tag (NAME must include a registry you can push to)
@@ -29,7 +29,7 @@
 #   - VERSION is the release (when REF is a vX.Y.Z tag);
 #   - the engines were configured portable: MAYA_PORTABLE on, GGML_NATIVE off, GGML_AVX2 on, nothing above AVX2;
 #   - they were configured for the CUDA architectures asked for;
-#   - every library of maya, maya-ds4 and maya-mm3 (when the archs have sm_70+) resolves, except the host driver's
+#   - every library of maya, and of maya-ds4 and maya-mm3 when the archs have sm_70+, resolves, except the host driver's
 #     (libcuda, libnvidia-*);
 #   - serve/server.py and the three pack builders start (--help);
 #   - the expert profiles and MiniMax's chat template are there;
@@ -74,10 +74,10 @@ case "$ENGINE" in
   docker|podman) command -v "$ENGINE" >/dev/null || die "$ENGINE is not installed" ;;
   *) die "--engine takes docker or podman, not '$ENGINE'" ;;
 esac
-# maya-mm3 needs sm_70 or newer (CMakeLists.txt's _mm3_archs): with only Pascal in the list it isn't built
-engines=(maya maya-ds4)
+# maya-ds4 and maya-mm3 need sm_70 or newer (the Dockerfile's engine list): with only Pascal in the list, maya alone
+engines=(maya)
 for a in ${ARCHS//;/ }; do
-  if (( a >= 70 )); then engines+=(maya-mm3); break; fi
+  if (( a >= 70 )); then engines+=(maya-ds4 maya-mm3); break; fi
 done
 
 root="$(git -C "$(dirname -- "${BASH_SOURCE[0]}")" rev-parse --show-toplevel 2>/dev/null)" \

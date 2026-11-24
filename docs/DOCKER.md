@@ -62,9 +62,10 @@ The image is a fat binary: each engine carries compiled code for each architectu
   Blackwell, older than 13 for Volta.
 - **Not covered:**
   - Pascal (`60` for the P100, `61` for the P40 and GTX 10), experimental in Maya. CUDA 12 compiles for it:
-    `--cuda 12 --archs "60"`. `maya-mm3` (MiniMax) needs sm_70 or newer, so an image for Pascal alone has `maya` and
-    `maya-ds4` only, and the checks expect just those two (`/opt/maya/image/engines.txt` lists the engines built). No
-    such image has been run on a Pascal card here yet.
+    `--cuda 12 --archs "60"`. `maya-ds4` (DeepSeek) and `maya-mm3` (MiniMax) need sm_70 or newer, and the setup
+    offers neither model below it, so an image for Pascal alone has `maya` (the GLM engine) only, and the checks
+    expect just that (`/opt/maya/image/engines.txt` lists the engines built). No such image has been run on a Pascal
+    card here yet.
   - AMD and Apple: the HIP and Metal builds aren't part of this recipe.
   - ARM64, such as a DGX Spark or Grace: the image is x86-64.
 

@@ -12,7 +12,7 @@
 # Text only: the vision encoder and the DFlash2 drafter are not built or fetched.
 
 # CUDA 13 builds sm_75 and newer; Volta (sm_70) and Pascal (sm_60 / sm_61, experimental) need CUDA 12
-# (docker/build.sh --cuda 12, with --archs "60" or "61" for Pascal)
+# (docker/build.sh --cuda 12, with --archs "60" or "61" for Pascal: the GLM engine alone)
 ARG CUDA_VERSION=13.0.0
 
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04 AS build
@@ -44,19 +44,20 @@ RUN cmake -S /src -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release \
         -DMAYA_GGML_DIR=/llama.cpp \
         -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache
 # The three engines: maya (GLM-5.3-Flash), maya-ds4 (DeepSeek-V4.1-Flash-1017) and maya-mm3 (MiniMax-M3.1-Flash).
-# maya-mm3 exists only when the list has sm_70 or newer (CMakeLists.txt's _mm3_archs: its kernels take more than
-# Pascal's 4 KB of parameters), so a Pascal-only image has the first two. The engines built go to /out/engines.txt.
+# maya-ds4 and maya-mm3 are built only when the list has sm_70 or newer: maya-mm3's kernels take more than Pascal's
+# 4 KB of parameters (CMakeLists.txt's _mm3_archs), maya-ds4's need dp4a and WMMA, and maya.py offers neither model
+# below sm_70 (DS4_GGUF_MIN_CC, MM3_GGUF_MIN_CC). A Pascal-only image has maya alone. The list goes to /out/engines.txt.
 # The ccache statistics go to the build log.
 RUN --mount=type=cache,id=project-maya-ccache,target=/root/.cache/ccache \
     ccache --zero-stats >/dev/null; \
     jobs="${JOBS:-$(( $(nproc) / 2 ))}"; [ "$jobs" -ge 1 ] || jobs=1; \
-    mkdir -p /out; : > /out/engines.txt; \
-    for t in maya maya-ds4 maya-mm3; do \
-      if [ "$t" = maya-mm3 ] && ! ninja -C /build -t targets all | grep -q '^maya-mm3:'; then \
-        echo "maya-mm3 not built: CUDA_ARCHITECTURES=${CUDA_ARCHITECTURES} has nothing at sm_70 or newer"; continue; \
-      fi; \
-      cmake --build /build --target "$t" -j "$jobs" || exit 1; echo "$t" >> /out/engines.txt; \
+    engines=maya; \
+    for a in $(echo "$CUDA_ARCHITECTURES" | tr ';' ' '); do \
+      if [ "${a%%-*}" -ge 70 ]; then engines="maya maya-ds4 maya-mm3"; break; fi; \
     done; \
+    [ "$engines" = maya ] && echo "maya-ds4 and maya-mm3 not built: CUDA_ARCHITECTURES=${CUDA_ARCHITECTURES} has nothing at sm_70 or newer"; \
+    mkdir -p /out; : > /out/engines.txt; \
+    for t in $engines; do cmake --build /build --target "$t" -j "$jobs" || exit 1; echo "$t" >> /out/engines.txt; done; \
     ccache --show-stats
 # The CPU settings and the CUDA architectures the tree was configured with, read from CMakeCache.txt for
 # docker/build.sh's checks
